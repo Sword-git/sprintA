@@ -74,6 +74,24 @@ class ActiveStreamBuffer:
             return True
         return (time.time() - received_at) > self._ttl_seconds
 
+    def append_sync(self, message: Dict[str, str]) -> None:
+        """同步追加消息到缓冲区（非并发安全，仅供同步调用方使用）。
+
+        消息结构：{"role": str, "content": str, "_received_at": float, "_seq": int}
+        满窗口时 FIFO 挤出最旧消息。
+        """
+        entry = {
+            "role": message["role"],
+            "content": message["content"],
+            "_received_at": time.time(),
+            "_seq": self._seq,
+        }
+        self._seq += 1
+        self._buffer.append(entry)
+        if len(self._buffer) > self._max_window_size:
+            self._buffer.pop(0)
+        self._cleanup_expired_sync()
+
     def size(self) -> int:
         """返回当前缓冲区内消息数量。"""
         return len(self._buffer)
