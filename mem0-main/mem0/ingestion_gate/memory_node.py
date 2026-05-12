@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class BoundaryType(str, Enum):
     """触发闸门放行的边界类型。"""
 
+    NONE = "none"                      # 无边界，初始状态
     TOPIC_COMPLETE = "topic_complete"  # 当前话题已充分讨论
     TOPIC_SWITCH = "topic_switch"      # 用户切换到新话题
     TIMEOUT = "timeout"                # 对话超时，系统强制刷写

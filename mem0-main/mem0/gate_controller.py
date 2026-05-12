@@ -29,6 +29,10 @@ class GateController(MemoryIngestionGate):
         self._trigger = trigger
         self._last_boundary_type: str = "none"
         self._is_flushed: bool = False
+        self._user_id: Optional[str] = None
+        self._agent_id: Optional[str] = None
+        self._run_id: Optional[str] = None
+        self._metadata: Optional[Dict[str, Any]] = None
 
     def process(
         self,
@@ -40,11 +44,20 @@ class GateController(MemoryIngestionGate):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """处理单条消息：追加到缓冲区 → 语义判定 → 返回是否触发 flush。"""
-        # TODO: 待 Sprint 1-B 实现 SemanticEventTrigger 后启用
-        # if self._trigger:
-        #     result = self._trigger.evaluate(self._buffer.get_window())
-        #     if result.is_boundary:
-        #         return True
+        self._user_id = user_id
+        self._agent_id = agent_id
+        self._run_id = run_id
+        self._metadata = metadata
+
+        # 追加消息到缓冲区
+        self._buffer.append_sync(message)
+
+        # 语义触发器判定
+        if self._trigger:
+            result = self._trigger.evaluate(self._buffer.get_window())
+            if result.is_boundary:
+                self._last_boundary_type = result.boundary_type
+                return True
         return False
 
     def flush(self) -> List[MemoryNode]:
@@ -55,6 +68,10 @@ class GateController(MemoryIngestionGate):
             messages=messages,
             boundary_type=BoundaryType[self._last_boundary_type.upper()],
             confidence=1.0,
+            user_id=self._user_id,
+            agent_id=self._agent_id,
+            run_id=self._run_id,
+            metadata=self._metadata,
         )
         self._buffer.clear()
         self._is_flushed = True
@@ -74,3 +91,7 @@ class GateController(MemoryIngestionGate):
         self._buffer.clear()
         self._last_boundary_type = "none"
         self._is_flushed = False
+        self._user_id = None
+        self._agent_id = None
+        self._run_id = None
+        self._metadata = None
