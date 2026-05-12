@@ -96,6 +96,14 @@ class ActiveStreamBuffer:
         """返回当前缓冲区内消息数量。"""
         return len(self._buffer)
 
+    def has_expired(self) -> bool:
+        """缓冲区是否包含过期消息（不执行清理）。"""
+        if not self._buffer:
+            return False
+        now = time.time()
+        cutoff = now - self._ttl_seconds
+        return any(m.get("_received_at", 0) <= cutoff for m in self._buffer)
+
     def cleanup_expired(self) -> int:
         """批量剔除过期消息，返回剔除数量。"""
         before = len(self._buffer)

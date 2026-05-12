@@ -610,3 +610,215 @@ class TestGateControllerBufferIntegration:
 
             # reset for next cycle (simulating continuation)
             gate._is_flushed = False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A2-002-ext: has_expired() on ActiveStreamBuffer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestHasExpired:
+    """has_expired() — check if buffer contains any expired messages (without removing)."""
+
+    @pytest.mark.asyncio
+    async def test_has_expired_false_when_all_fresh(self, buffer):
+        """All messages within TTL → has_expired() returns False."""
+        with freeze_time("2026-05-12 10:00:00"):
+            for i in range(3):
+                await buffer.append(make_message(content=f"msg-{i}"))
+
+        with freeze_time("2026-05-12 10:01:00"):  # only 60s elapsed, TTL=300
+            assert buffer.has_expired() is False
+
+    @pytest.mark.asyncio
+    async def test_has_expired_true_when_some_expired(self, buffer):
+        """Messages past TTL → has_expired() returns True."""
+        with freeze_time("2026-05-12 10:00:00") as frozen:
+            for i in range(3):
+                await buffer.append(make_message(content=f"msg-{i}"))
+
+            frozen.move_to("2026-05-12 10:06:00")  # +360s > 300s TTL
+
+            assert buffer.has_expired() is True
+
+    @pytest.mark.asyncio
+    async def test_has_expired_false_for_empty_buffer(self, buffer):
+        """Empty buffer → has_expired() returns False."""
+        with freeze_time("2026-05-12 10:06:00"):
+            assert buffer.has_expired() is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A2-002: GateController check_timeout()
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestGateControllerCheckTimeout:
+    """A2-002: check_timeout() returns True when buffer has expired messages."""
+
+    def test_check_timeout_false_when_fresh(self, buffer):
+        """All messages within TTL → check_timeout() returns False."""
+        with freeze_time("2026-05-12 10:00:00"):
+            for i in range(3):
+                buffer._buffer.append({
+                    "role": "user", "content": f"msg-{i}",
+                    "_received_at": time.time(), "_seq": i,
+                })
+
+        with freeze_time("2026-05-12 10:01:00"):  # 60s < 300s TTL
+            gate = GateController(buffer=buffer)
+            assert gate.check_timeout() is False
+
+    def test_check_timeout_true_when_expired(self, buffer):
+        """Messages past TTL → check_timeout() returns True."""
+        with freeze_time("2026-05-12 10:00:00") as frozen:
+            for i in range(3):
+                buffer._buffer.append({
+                    "role": "user", "content": f"msg-{i}",
+                    "_received_at": time.time(), "_seq": i,
+                })
+
+            frozen.move_to("2026-05-12 10:06:00")  # +360s > 300s TTL
+
+            gate = GateController(buffer=buffer)
+            assert gate.check_timeout() is True
+
+    def test_check_timeout_false_for_empty_buffer(self, buffer):
+        """Empty buffer → check_timeout() returns False."""
+        gate = GateController(buffer=buffer)
+        assert gate.check_timeout() is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A2-002: GateController force_flush()
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestGateControllerForceFlush:
+    """A2-002: force_flush() forces MemoryNode creation regardless of trigger state."""
+
+    def test_force_flush_creates_node_without_trigger(self, buffer):
+        """force_flush() works even when no trigger is set."""
+        now = time.time()
+        for i in range(3):
+            buffer._buffer.append({
+                "role": "user", "content": f"msg-{i}",
+                "_received_at": now, "_seq": i,
+            })
+
+        gate = GateController(buffer=buffer)
+        nodes = gate.force_flush()
+
+        assert len(nodes) == 1
+        assert isinstance(nodes[0], MemoryNode)
+        assert len(nodes[0].messages) == 3
+        assert buffer.size() == 0
+
+    def test_force_flush_uses_boundary_type_force_by_default(self, buffer):
+        """force_flush() defaults to BoundaryType.FORCE."""
+        now = time.time()
+        buffer._buffer.append({
+            "role": "user", "content": "msg",
+            "_received_at": now, "_seq": 0,
+        })
+
+        gate = GateController(buffer=buffer)
+        nodes = gate.force_flush()
+
+        assert nodes[0].boundary_type == BoundaryType.FORCE
+
+    def test_force_flush_accepts_explicit_boundary_type(self, buffer):
+        """force_flush() accepts an explicit boundary_type parameter."""
+        now = time.time()
+        buffer._buffer.append({
+            "role": "user", "content": "msg",
+            "_received_at": now, "_seq": 0,
+        })
+
+        gate = GateController(buffer=buffer)
+        nodes = gate.force_flush(boundary_type="timeout")
+
+        assert nodes[0].boundary_type == BoundaryType.TIMEOUT
+
+    def test_force_flush_preserves_user_metadata(self, buffer):
+        """force_flush() includes stored user_id, agent_id, run_id in MemoryNode."""
+        now = time.time()
+        buffer._buffer.append({
+            "role": "user", "content": "msg",
+            "_received_at": now, "_seq": 0,
+        })
+
+        gate = GateController(buffer=buffer)
+        gate._user_id = "u1"
+        gate._agent_id = "a1"
+        gate._run_id = "r1"
+        gate._metadata = {"key": "val"}
+
+        nodes = gate.force_flush()
+        node = nodes[0]
+
+        assert node.user_id == "u1"
+        assert node.agent_id == "a1"
+        assert node.run_id == "r1"
+        assert node.metadata == {"key": "val"}
+
+    def test_force_flush_sets_is_flushed(self, buffer):
+        """force_flush() sets _is_flushed to True."""
+        now = time.time()
+        buffer._buffer.append({
+            "role": "user", "content": "msg",
+            "_received_at": now, "_seq": 0,
+        })
+
+        gate = GateController(buffer=buffer)
+        gate.force_flush()
+
+        assert gate._is_flushed is True
+
+    def test_force_flush_empty_buffer_returns_node_with_no_messages(self, buffer):
+        """force_flush() on empty buffer returns a MemoryNode with empty messages."""
+        gate = GateController(buffer=buffer)
+        nodes = gate.force_flush()
+
+        assert len(nodes) == 1
+        assert nodes[0].messages == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A2-002: GateController get_state() with real ttl_remaining
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestGateControllerTtlRemaining:
+    """get_state() returns correct ttl_remaining based on oldest message age."""
+
+    def test_ttl_remaining_positive_for_fresh_messages(self, buffer):
+        """ttl_remaining is TTL minus age of oldest message."""
+        with freeze_time("2026-05-12 10:00:00") as frozen:
+            buffer._buffer.append({
+                "role": "user", "content": "oldest",
+                "_received_at": time.time(), "_seq": 0,
+            })
+
+            frozen.move_to("2026-05-12 10:01:00")  # 60s elapsed
+
+            gate = GateController(buffer=buffer)
+            state = gate.get_state()
+            # 300 - 60 = 240, with small tolerance
+            assert 230 <= state["ttl_remaining"] <= 250
+
+    def test_ttl_remaining_zero_for_empty_buffer(self, buffer):
+        """ttl_remaining is 0 when buffer is empty."""
+        gate = GateController(buffer=buffer)
+        state = gate.get_state()
+        assert state["ttl_remaining"] == 0
+
+    def test_ttl_remaining_zero_when_expired(self, buffer):
+        """ttl_remaining is 0 when oldest message has expired."""
+        with freeze_time("2026-05-12 10:00:00") as frozen:
+            buffer._buffer.append({
+                "role": "user", "content": "old",
+                "_received_at": time.time(), "_seq": 0,
+            })
+
+            frozen.move_to("2026-05-12 10:06:00")  # past TTL
+
+            gate = GateController(buffer=buffer)
+            state = gate.get_state()
+            assert state["ttl_remaining"] == 0
